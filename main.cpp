@@ -1,5 +1,5 @@
 #include <iostream>
-#include "raylib.h"
+#include "vendor/raylib/include/raylib.h"
 
 #include "HandMadeMath.h"
 #include "defines.h"
@@ -14,7 +14,10 @@ struct Enemy {
     Vector3 position {0, 0, 0};
     Vector3 direction = {0, 0, 0};
     f32 speed = {8};
+    
     f32 health {100.0};
+    f32 damage {3.0f};
+
     f32 width {1.1};
     f32 height {1.8};
 };
@@ -23,6 +26,9 @@ struct Player {
     Vector3 position  {0, 0, 0};
     Vector3 aim = {1, 0, 0};
     f32 speed {30.5};
+    bool pulling_trigger {false};
+
+    f32 health {100.0f};
     
     f32 size {2};
 };
@@ -70,13 +76,13 @@ typedef enum GameScreen {
 } game_screen;
 
 struct GameInput {
-    int button_a;
-    int button_b;
-    int button_x;
-    int button_y;
+    i8 button_a;
+    i8 button_b;
+    i8 button_x;
+    i8 button_y;
 
-    int button_start;
-    int button_back;
+    i8 button_start;
+    i8 button_back;
 
     struct AxisLeft {
         f32 x;
@@ -92,12 +98,185 @@ struct GameInput {
     f32 trigger_right;
 };
 
+
+
+void UpdateAndRender(Game *game, Camera *camera, GameInput input, f32 dt, f32 window_width, f32 window_height) {
+    Player *player = &game->player;
+
+    player->position.y = player->size / 2.f;
+    player->position.x += input.axis_left.x * player->speed * dt;
+    player->position.z += input.axis_left.y * player->speed * dt;
+
+    game->gun.barrel_exit = player->position;
+
+    camera->target   = player->position;
+    camera->position = { player->position.x, player->position.y + 75, player->position.z + 30 };
+
+    hmm_v3 aim_axis = { input.axis_right.x, 0, input.axis_right.y };
+    f32 l = HMM_LengthVec3(aim_axis);
+    if (l > 0.06) {
+        aim_axis.X = aim_axis.X / l;
+        aim_axis.Z = aim_axis.Z / l;
+    }
+    player->aim = {aim_axis.X, aim_axis.Y, aim_axis.Z};
+
+    // Bullets logic
+        i32 max_bullets = game->max_bullets;
+        bool want_to_fire_gun  = player->pulling_trigger || input.trigger_right > 0.7;
+        if (want_to_fire_gun) {
+            Gun *gun = &game->gun;
+            if (!gun->trigger_down) {
+                gun->trigger_down = true;
+                gun->current_time = 0;
+            }
+            else {
+                gun->current_time++;
+                if (gun->current_time > gun->shot_duration) {
+                    gun->current_time = 0;
+                    if (game->bullet_count < max_bullets) {
+                        // Add bullet
+
+                        Bullet *bullet = &game->bullets[game->bullet_count];
+                        bullet->direction = game->player.aim;
+                        bullet->position = game->gun.barrel_exit;
+                        game->bullet_count = game->bullet_count + 1;     
+                    }
+                }
+            }
+        }   
+
+    auto getDistanceIgnoreY = [] (Vector3 v1, Vector3 v2) {
+                            f32 x = v1.x - v2.x;
+                            f32 z = v1.z - v2.z;
+
+                            f32 x2 = x * x;
+                            f32 z2 = z * z;
+
+                            return sqrtf(x2 + z2);
+                        };
+
+    // Draw the "GAME screen"
+    {
+
+
+        // Background
+        DrawRectangle(0,0, window_width, window_height, DARKGRAY);
+
+        BeginMode3D(*camera);
+        
+        // Update, draw and possibly remove bullets
+        {
+            if (game->bullet_count) {
+                
+                for (i32 i = 0; i < game->bullet_count; i++) {
+                    Bullet *bullet = &game->bullets[i];
+                    bullet->position.x = bullet->position.x + (bullet->speed * bullet->direction.x) * dt;
+                    bullet->position.z = bullet->position.z + (bullet->speed * bullet->direction.z) * dt;
+                    bullet->age++;
+
+                    Vector3 pos = bullet->position;
+                    bool remove = false;
+
+
+                    // Check all enemies for hit!
+                    for (i32 i = 0; i < game->enemy_count; i++) {
+                        Enemy *enemy = &game->enemies[i];
+                        Vector3 enemy_pos = enemy->position;
+
+                        
+                        f32 distance = getDistanceIgnoreY(pos, enemy_pos);
+                        if (distance < bullet->size + enemy->width) {
+                            enemy->health -= bullet->damage;
+                            //remove = true;
+                        }
+                    }
+                    
+                    DrawSphere(bullet->position, bullet->size, YELLOW);
+
+
+
+                    if (bullet->age >= 120) { // frames 
+                        remove = true;
+                    }
+
+                    if (remove) {
+                        // Swap the last one to this one, reduce count
+                        i32 index = game->bullet_count - 1;
+                        if (index >= 0) {
+                            game->bullets[i] = game->bullets[index];
+                            Bullet b = {};
+                            game->bullets[index] = b;
+                            game->bullet_count--;
+                        }
+                    }
+                }
+            }
+        }
+        // Update, draw and possinly remove enemies
+        {
+            if (game->enemy_count) {
+                
+                for (i32 i = game->enemy_count - 1; i >= 0; i--) {
+                    bool remove = false;
+                    Enemy *enemy = &game->enemies[i];
+
+                    enemy->position.x += (enemy->speed * enemy->direction.x) * dt;
+                    enemy->position.z += (enemy->speed * enemy->direction.z) * dt;
+
+                    // Check player contact
+                    {
+                        Vector3 player_pos = player->position;
+                        Vector3 enemy_pos = enemy->position;
+                        f32 dist = getDistanceIgnoreY(player_pos, enemy_pos);
+                        if (dist < player->size/2 + enemy->width/2) {
+                            player->health -= enemy->damage;
+                            enemy->direction.x *= -1.0f;
+                            enemy->direction.y *= -1.0f;
+                        }
+                    }
+                   
+                    if (enemy->health > 0) {
+                        DrawCube(enemy->position, enemy->width, enemy->height, enemy->width, RED);
+                    }
+                    else {
+                        remove = true;
+                    }
+
+                    if (remove) {
+                        i32 last_index = game->enemy_count - 1;
+                        if (last_index) {
+                            game->enemies[i] = game->enemies[last_index];
+                            Enemy e = {};
+                            game->enemies[last_index] = e;
+                            game->enemy_count--;
+                        }
+                    }
+                }
+            }
+        }
+
+
+        // Draw player
+        Player *player = &game->player;
+        Vector3 pos = player->position;
+        f32 a = 1.0f;
+        Color faded_blue = ColorAlpha(BLUE, a);
+        DrawCube(pos, player->size, player->size, player->size, faded_blue);
+        
+
+        DrawGrid(300, 10);
+        EndMode3D();
+    }
+}
+
+
+
 int main() {
     u16 window_width = 1280;
     u16 window_height = 860; 
-    SetConfigFlags(FLAG_MSAA_4X_HINT);  
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT );  
     InitWindow(window_width, window_height, "Basic screen management");
-    SetTargetFPS(60);
+    //SetTargetFPS(60);
 
     Game *game = new Game();
 
@@ -132,8 +311,6 @@ int main() {
     int frame_count = 0;
 
     // Font setup 
-    Font menu_font = LoadFont("assets/Inconsolata-Light.ttf");
-    SetTextureFilter(menu_font.texture, TEXTURE_FILTER_TRILINEAR);
     int font_size = 64;
 
     while (!WindowShouldClose()) {
@@ -174,30 +351,35 @@ int main() {
                 input.axis_left.y += y_dir;
             }
 
+            // Cursor keys, when down, fire gun
             {
                 i32 x_dir = 0;
                 i32 y_dir = 0;
+                bool should_fire = false;
                 if (IsKeyDown(KEY_UP)) {
                     y_dir -= 1;    
+                    should_fire = true;
                 }
                 if (IsKeyDown(KEY_DOWN)) {
                     y_dir += 1;
+                    should_fire = true;
                 }
                 if (IsKeyDown(KEY_LEFT)) {
                     x_dir -= 1;
+                    should_fire = true;
                 }
                 if (IsKeyDown(KEY_RIGHT)) {
                     x_dir += 1;
+                    should_fire = true;
                 }
-                
+
+                game->player.pulling_trigger = should_fire;
                 
                 input.axis_right.x = GetGamepadAxisMovement(game_pad_num, GAMEPAD_AXIS_RIGHT_X);
                 input.axis_right.x += x_dir;
                 input.axis_right.y = GetGamepadAxisMovement(game_pad_num, GAMEPAD_AXIS_RIGHT_Y);
                 input.axis_right.y += y_dir;
 
-                hmm_vec2 normalized = HMM_NormalizeVec2( HMM_Vec2(input.axis_left.x, input.axis_left.y) );
-                //dinput.axis_left = {normalized.X, normalized.Y};
             }
 
             //input.trigger_left  = GetGamepadAxisMovement(game_pad_num, GAMEPAD_AXIS_LEFT_TRIGGER);
@@ -215,7 +397,8 @@ int main() {
             
 
             switch (game_screen) {
-               
+
+                case LOGO:
                 case TITLE: {
                     if (input.button_start)
                         game_screen = GAMEPLAY;
@@ -231,176 +414,10 @@ int main() {
 
                 case GAMEPLAY: {
                     if (input.button_back)
-                        game_screen = TITLE;
+                        game_screen = TITLE;    
 
-                   
-
-                    Player *player = &game->player;
-
-                    player->position.y = player->size / 2.f;
-                    player->position.x += input.axis_left.x * player->speed * 0.0133;
-                    player->position.z += input.axis_left.y * player->speed * 0.0133;
-
-                    game->gun.barrel_exit = player->position;
-
-                    camera.target   = player->position;
-                    camera.position = { player->position.x, player->position.y + 75, player->position.z + 30 };
-
-                    hmm_v3 aim_axis = { input.axis_right.x, 0, input.axis_right.y };
-                    f32 l = HMM_LengthVec3(aim_axis);
-                    if (l > 0.06) {
-                        aim_axis.X = aim_axis.X / l;
-                        aim_axis.Z = aim_axis.Z / l;
-                    }
-                    game->player.aim = {aim_axis.X, aim_axis.Y, aim_axis.Z};
-                    
-
-                    // Draw the "GAME screen"
-                    {
-                        // Background
-                        DrawRectangle(0,0, window_width, window_height, DARKGRAY);
-
-                        BeginMode3D(camera);
-                        
-                        f32 w = game->player.size;
-                        f32 h = w;
-                        
-                        
-
-                        i32 max_bullets = game->max_bullets;
-                        // Bullets logic
-                        if (input.trigger_right > 0.7) {
-                            Gun *gun = &game->gun;
-                            if (!gun->trigger_down) {
-                                gun->trigger_down = true;
-                                gun->current_time = 0;
-                            }
-                            else {
-                                gun->current_time++;
-                                if (gun->current_time > gun->shot_duration) {
-                                    gun->current_time = 0;
-                                    if (game->bullet_count < max_bullets) {
-                                        // Add bullet
-
-                                        Bullet *bullet = &game->bullets[game->bullet_count];
-                                        bullet->direction = game->player.aim;
-                                        bullet->position = game->gun.barrel_exit;
-                                        game->bullet_count = game->bullet_count + 1;     
-                                    }
-                                }
-                            }
-                        }   
-
-                        
-                        // Update, draw and possibly remove bullets
-                        {
-                            if (game->bullet_count) {
-                                
-                                for (i32 i = 0; i < game->bullet_count; i++) {
-                                    Bullet *bullet = &game->bullets[i];
-                                    bullet->position.x = bullet->position.x + (bullet->speed * bullet->direction.x) * 0.0133;
-                                    bullet->position.z = bullet->position.z + (bullet->speed * bullet->direction.z) * 0.0133;
-                                    bullet->age++;
-
-                                    Vector3 pos = bullet->position;
-                                    bool remove = false;
-
-
-                                    // Check all enemies for hit!
-                                    for (i32 i = 0; i < game->enemy_count; i++) {
-                                        Enemy *enemy = &game->enemies[i];
-                                        Vector3 enemy_pos = enemy->position;
-
-                                        auto getDistance = [] (Vector3 v1, Vector3 v2) {
-                                            f32 x = v1.x - v2.x;
-                                            f32 y = v1.y - v2.y;
-                                            f32 z = v1.z - v2.z;
-
-                                            f32 x2 = x * x;
-                                            f32 y2 = y * y;
-                                            f32 z2 = z * z;
-
-                                            return sqrtf(x2 + y2 + z2);
-                                        };
-                                        f32 distance = getDistance(pos, enemy_pos);
-                                        if (distance < bullet->size + enemy->width) {
-                                            enemy->health -= bullet->damage;
-                                            remove = true;
-                                        }
-                                    }
-                                    
-                                    DrawSphere(bullet->position, bullet->size, YELLOW);
-
-
-
-                                    if (bullet->age >= 120) { // frames 
-                                        remove = true;
-                                    }
-
-                                    if (remove) {
-                                        // Swap the last one to this one, reduce count
-                                        i32 index = game->bullet_count - 1;
-                                        if (index >= 0) {
-                                            game->bullets[i] = game->bullets[index];
-                                            Bullet b = {};
-                                            game->bullets[index] = b;
-                                            game->bullet_count--;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Update, draw and possinly remove enemies
-                        {
-                            if (game->enemy_count) {
-                                for (i32 i = game->enemy_count - 1; i >= 0; i--) {
-                                    bool remove = false;
-                                    Enemy *enemy = &game->enemies[i];
-
-                                    enemy->position.x += (enemy->speed * enemy->direction.x) * (1/60.0f);
-                                    enemy->position.z += (enemy->speed * enemy->direction.z) * (1/60.0f);
-
-                                    // Check OOB
-                                    
-                                    if (enemy->health > 0) {
-                                        DrawCube(enemy->position, enemy->width, enemy->height, enemy->width, RED);
-                                    }
-                                    else {
-                                        remove = true;
-                                    }
-
-                                    if (remove) {
-                                        i32 last_index = game->enemy_count - 1;
-                                        if (last_index) {
-                                            game->enemies[i] = game->enemies[last_index];
-                                            Enemy e = {};
-                                            game->enemies[last_index] = e;
-                                            game->enemy_count--;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-
-                        // Draw player
-                        Player *player = &game->player;
-                        Vector3 pos = player->position;
-                        DrawCube(pos, player->size, player->size, player->size, BLUE);
-                        
-
-                        // Draw reticle/gun
-                        {
-                            
-                            
-                            game->gun.barrel_exit = pos;
-                            //DrawRectangle(x, y, w_reticle, w_reticle, RED);
-                        }
-
-                        DrawGrid(300, 10);
-                        EndMode3D();
-                    } // GAME SCREEN
-
+                    f32 dt = GetFrameTime();
+                    UpdateAndRender(game, &camera, input, dt, window_width, window_height);
                 }
                 break;
 
