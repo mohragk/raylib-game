@@ -10,7 +10,10 @@ f32 lerp(f32 a, f32 b, f32 t) {
 }
 
 
+
+
 struct Enemy {
+    u16 id;
     Vector3 position {0, 0, 0};
     Vector3 direction = {0, 0, 0};
     f32 speed = {8};
@@ -23,8 +26,8 @@ struct Enemy {
 };
 
 struct Player {
-    Vector3 position  {0, 0, 0};
-    Vector3 aim = {1, 0, 0};
+    Vector3 position {0, 0, 0};
+    Vector3 aim {1, 0, 0};
     f32 speed {30.5};
     bool pulling_trigger {false};
 
@@ -50,6 +53,96 @@ struct Gun {
     u32 current_time {0};
 
     bool trigger_down {false};
+};
+
+struct Boundary {
+    Vector3 center;
+    Vector3 dimensions;
+};
+
+#define ENEMY_BUCKET_CAPACITY 16
+struct EnemyBucket {
+    u32 enemies[ENEMY_BUCKET_CAPACITY];
+    u32 count{ 0 };
+};
+
+struct QuadTree {
+
+    QuadTree(Boundary boundary) {
+        this->boundary = boundary;
+    }
+
+    ~QuadTree() {
+        if (is_subdivided) {
+            delete nw;
+            delete sw;
+            delete ne;
+            delete se;
+        }
+    }
+
+    Boundary boundary;
+    EnemyBucket bucket;
+
+    QuadTree *nw, *ne, *sw, *se;
+
+    bool is_subdivided {false};
+
+    EnemyBucket getBucket(Vector3 location) {
+        return bucket;
+    }
+
+    void insert( Enemy *enemy ) {
+        if (!inside(enemy->position)) return;
+
+        if ( ++bucket.count >= ENEMY_BUCKET_CAPACITY  ) {
+            bucket.count = ENEMY_BUCKET_CAPACITY;
+
+            is_subdivided = true;
+            Boundary sub_boundary = {};
+
+            {
+                sub_boundary.center.x = boundary.center.x + boundary.dimensions.x/2;
+                sub_boundary.center.y = boundary.center.y - boundary.dimensions.y/2; 
+                ne = new QuadTree(sub_boundary);
+            }
+            {
+                sub_boundary.center.x = boundary.center.x - boundary.dimensions.x/2;
+                sub_boundary.center.y = boundary.center.y - boundary.dimensions.y/2; 
+                nw = new QuadTree(sub_boundary);
+            }
+            {
+                sub_boundary.center.x = boundary.center.x - boundary.dimensions.x/2;
+                sub_boundary.center.y = boundary.center.y + boundary.dimensions.y/2; 
+                se = new QuadTree(sub_boundary);
+            }
+            {
+                sub_boundary.center.x = boundary.center.x + boundary.dimensions.x/2;
+                sub_boundary.center.y = boundary.center.y + boundary.dimensions.y/2; 
+                sw = new QuadTree(sub_boundary);
+            }
+
+            ne->insert(enemy);
+            nw->insert(enemy);
+            se->insert(enemy);
+            sw->insert(enemy);
+
+        }
+        else {
+            bucket.enemies[bucket.count] = enemy->id;
+        }
+    }
+
+    bool inside(Vector3 pos) {
+        return (pos.x >= boundary.center.x - boundary.dimensions.x || pos.x < boundary.center.x + boundary.dimensions.x ) 
+        || (pos.y >= boundary.center.y - boundary.dimensions.y || pos.y < boundary.center.y + boundary.dimensions.y);
+    }
+
+    bool subdivide() {
+        is_subdivided = true;
+        return true;
+    }
+
 };
 
 struct Game {
@@ -121,48 +214,65 @@ void UpdateAndRender(Game *game, Camera *camera, GameInput input, f32 dt, f32 wi
     player->aim = {aim_axis.X, aim_axis.Y, aim_axis.Z};
 
     // Bullets logic
-        i32 max_bullets = game->max_bullets;
-        bool want_to_fire_gun  = player->pulling_trigger || input.trigger_right > 0.7;
-        if (want_to_fire_gun) {
-            Gun *gun = &game->gun;
-            if (!gun->trigger_down) {
-                gun->trigger_down = true;
+    i32 max_bullets = game->max_bullets;
+    bool want_to_fire_gun  = player->pulling_trigger || input.trigger_right > 0.7;
+    if (want_to_fire_gun) {
+        Gun *gun = &game->gun;
+        if (!gun->trigger_down) {
+            gun->trigger_down = true;
+            gun->current_time = 0;
+        }
+        else {
+            gun->current_time++;
+            if (gun->current_time > gun->shot_duration) {
                 gun->current_time = 0;
-            }
-            else {
-                gun->current_time++;
-                if (gun->current_time > gun->shot_duration) {
-                    gun->current_time = 0;
-                    if (game->bullet_count < max_bullets) {
-                        // Add bullet
+                if (game->bullet_count < max_bullets) {
+                    // Add bullet
 
-                        Bullet *bullet = &game->bullets[game->bullet_count];
-                        bullet->direction = game->player.aim;
-                        bullet->position = game->gun.barrel_exit;
-                        game->bullet_count = game->bullet_count + 1;     
-                    }
+                    Bullet *bullet = &game->bullets[game->bullet_count];
+                    bullet->direction = game->player.aim;
+                    bullet->position = game->gun.barrel_exit;
+                    game->bullet_count = game->bullet_count + 1;     
                 }
             }
-        }   
+        }
+    }   
 
     auto getDistanceIgnoreY = [] (Vector3 v1, Vector3 v2) {
-                            f32 x = v1.x - v2.x;
-                            f32 z = v1.z - v2.z;
+        f32 x = v1.x - v2.x;
+        f32 z = v1.z - v2.z;
 
-                            f32 x2 = x * x;
-                            f32 z2 = z * z;
+        f32 x2 = x * x;
+        f32 z2 = z * z;
 
-                            return sqrtf(x2 + z2);
-                        };
+        return sqrtf(x2 + z2);
+    };
+
+
+
+    // CREATE ENEMY QuadTree 
+    Boundary boundary;
+    boundary.center =  {player->position.x, player->position.y, 0};
+    boundary.dimensions = {1000.0, 1000.0, 0.0};
+    QuadTree *qt = new QuadTree(boundary);
+    {
+        for (u32 i = 0; i < (u32)game->enemy_count; i++) {
+            Enemy *enemy = &game->enemies[i];
+            qt->insert(enemy);
+        }
+    }
+
+
+    
 
     // Draw the "GAME screen"
     {
-
-
         // Background
         DrawRectangle(0,0, window_width, window_height, DARKGRAY);
 
         BeginMode3D(*camera);
+
+
         
         // Update, draw and possibly remove bullets
         {
@@ -212,7 +322,7 @@ void UpdateAndRender(Game *game, Camera *camera, GameInput input, f32 dt, f32 wi
                 }
             }
         }
-        // Update, draw and possinly remove enemies
+        // Update, draw and possibly remove enemies
         {
             if (game->enemy_count) {
                 
@@ -266,6 +376,8 @@ void UpdateAndRender(Game *game, Camera *camera, GameInput input, f32 dt, f32 wi
 
         DrawGrid(300, 10);
         EndMode3D();
+
+        delete qt;
     }
 }
 
@@ -295,6 +407,7 @@ int main() {
     game->enemy_count = enemy_count;
     for (i16 i = 0; i < enemy_count; i++) {
         Enemy *enemy = &game->enemies[i];
+        enemy->id = i;
         enemy->position = {
             (f32)GetRandomValue(-100, 100), 
             1,
